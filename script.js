@@ -36,17 +36,17 @@ masterGainNode.gain.value = MASTER_GAIN;
 
 // Create compressor to prevent distortion
 const compressor = audioContext.createDynamicsCompressor();
-compressor.threshold.value = -10; // Start compression at -20dB
+compressor.threshold.value = -10; // Start compression at -10dB
 compressor.knee.value = 10; // Smooth transition
 compressor.ratio.value = 12; // 12:1 compression ratio
-compressor.attack.value = 0.003; // Fast attack
-compressor.release.value = 0.25; // Moderate release
+compressor.attack.value = 0.003; // Fast attack (seconds)
+compressor.release.value = 0.25; // Moderate release (seconds)
 
 // Connect: compressor -> master gain -> destination
 compressor.connect(masterGainNode);
 masterGainNode.connect(audioContext.destination);
 
-// Master note frequency mapping (single source of truth)
+// Master note frequency mapping
 const NOTE_FREQUENCIES = {
     'C': 261.63,
     'C#': 277.18,
@@ -98,7 +98,7 @@ const openKeys = {
     'F': { minor: '9m', major: '12d' }
 };
 
-// Camelot wheel color scheme (based on reference image)
+// Camelot wheel color scheme
 const keyColors = {
     'B': { minor: 'rgb(201, 214, 250)', major: 'rgb(109, 234, 203	)' },      // 10A/1B
     'F#': { minor: 'rgb(171, 231, 247)', major: 'rgb(121, 235, 142)' },    // 11A/2B
@@ -209,6 +209,29 @@ function isMajorCounterpart(baseNote, checkNote) {
     return shiftNoteBySemitones(baseNote, 3) === checkNote;
 }
 
+// Determine if a note should have primary highlighting based on its type and settings
+function shouldNoteBePrimary(noteName, source = null, type = null) {
+    if (!noteName) return true;
+    
+    // For wheel clicks, the clicked type determines primary status
+    if (source === 'wheel' && type) {
+        return true;
+    }
+    
+    // For piano/keyboard input, check if this note has major/minor counterparts
+    const majorCounterpart = shiftNoteBySemitones(noteName, 3);
+    const minorCounterpart = shiftNoteBySemitones(noteName, -3);
+    
+    if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
+        // A note is a "major chord center" if it has a minor counterpart 3 semitones down
+        const isMajorChordCenter = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
+        // Primary highlighting depends on the majorOnTop setting
+        return majorOnTop ? isMajorChordCenter : !isMajorChordCenter;
+    }
+    
+    return true;
+}
+
 // Function to get note name from frequency
 function getNoteFromFrequency(frequency) {
     for (const [noteName, noteFreq] of Object.entries(NOTE_FREQUENCIES)) {
@@ -227,15 +250,27 @@ function formatNoteName(noteName) {
     return noteName;
 }
 
-// Function to update highlighting for all active notes based on majorOnTop setting
-function updateActiveNotesHighlighting() {
-    // First, remove all primary highlighting
+// Helper function to clear all primary highlighting
+function clearPrimaryHighlighting() {
     document.querySelectorAll('.active-primary').forEach(el => {
         el.classList.remove('active-primary');
     });
     document.querySelectorAll('.primary-active').forEach(el => {
         el.classList.remove('primary-active');
     });
+}
+
+// Helper function to apply primary highlighting to elements
+function applyPrimaryHighlighting(selector, className = 'active-primary') {
+    document.querySelectorAll(selector).forEach(el => {
+        el.classList.add(className);
+    });
+}
+
+// Function to update highlighting for all active notes based on majorOnTop setting
+function updateActiveNotesHighlighting() {
+    // First, remove all primary highlighting
+    clearPrimaryHighlighting();
     
     // Re-apply highlighting based on current majorOnTop setting
     Object.entries(activeOscillators).forEach(([actualFreq, data]) => {
@@ -247,22 +282,11 @@ function updateActiveNotesHighlighting() {
         // If this note was played from the wheel, keep its original primary status
         if (chordType) {
             // Wheel click - the clicked chord type should remain primary
-            document.querySelectorAll(`[data-frequency="${baseFrequency}"][data-chord-type="${chordType}"]`).forEach(el => {
-                el.classList.add('active-primary');
-            });
-            document.querySelectorAll(`.note-label[data-note="${noteName}"][data-type="${chordType}"]`).forEach(label => {
-                label.classList.add('primary-active');
-            });
+            applyPrimaryHighlighting(`[data-frequency="${baseFrequency}"][data-chord-type="${chordType}"]`);
+            applyPrimaryHighlighting(`.note-label[data-note="${noteName}"][data-type="${chordType}"]`, 'primary-active');
         } else {
             // Piano/keyboard input - update based on majorOnTop setting
-            const majorCounterpart = shiftNoteBySemitones(noteName, 3);
-            const minorCounterpart = shiftNoteBySemitones(noteName, -3);
-            
-            let isPrimary = true;
-            if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
-                const isMajorChordCenter = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
-                isPrimary = majorOnTop ? isMajorChordCenter : !isMajorChordCenter;
-            }
+            const isPrimary = shouldNoteBePrimary(noteName);
             
             // Update wheel segments
             document.querySelectorAll(`[data-frequency="${baseFrequency}"]`).forEach(el => {
@@ -272,8 +296,8 @@ function updateActiveNotesHighlighting() {
                     if (shouldBePrimary) {
                         el.classList.add('active-primary');
                     }
-                } else if (isPrimary) {
-                    // Piano keys
+                } else {
+                    // Piano keys - always add active-primary for consistent darker shading
                     el.classList.add('active-primary');
                 }
             });
@@ -382,61 +406,65 @@ function adjustActiveVolumes() {
     });
 }
 
-// Function to play a note
-function playNote(frequency, applyOctaveShift = true, isPrimary = true) {
-    // Apply octave shift if requested
-    const actualFrequency = applyOctaveShift ? frequency * Math.pow(2, octaveShift) : frequency;
+// Helper function to update held notes
+function updateHeldNotes(noteName, source, type) {
+    if (!noteName) return;
     
-    // Always stop any existing instance of this note first
-    if (activeOscillators[actualFrequency]) {
-        stopNote(actualFrequency);
+    // Remove any existing instance of this note
+    const existingIndex = heldNotes.findIndex(note => 
+        (typeof note === 'string' ? note : note.note) === noteName
+    );
+    if (existingIndex > -1) {
+        heldNotes.splice(existingIndex, 1);
     }
     
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
+    // Add new note
+    if (source === 'wheel' && type) {
+        heldNotes.push({ note: noteName, source: 'wheel', type: type });
+        lastPlayedNote = { note: noteName, source: 'wheel', type: type };
+    } else {
+        heldNotes.push(noteName);
+        lastPlayedNote = noteName;
+    }
     
-    oscillator.connect(gainNode);
-    gainNode.connect(compressor); // Connect to compressor instead of destination
-    
-    oscillator.frequency.value = actualFrequency;
-    oscillator.type = 'sine';
-    
-    // Start with zero gain to avoid pops
-    gainNode.gain.value = 0;
-    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-    // Fixed volume for all notes - let compressor handle limiting
-    gainNode.gain.linearRampToValueAtTime(OSC_GAIN, audioContext.currentTime + 0.007);
-    
-    oscillator.start();
-    activeOscillators[actualFrequency] = { oscillator, gainNode, baseFrequency: frequency, isPrimary };
-    
-    // Update held notes and center display
-    const noteName = getNoteFromFrequency(frequency);
-    
+    updateCenterDisplay();
+}
+
+// Helper function to highlight note elements
+function highlightNoteElements(frequency, noteName, isPrimary, specificType) {
     // Highlight all elements with this frequency
     document.querySelectorAll(`[data-frequency="${frequency}"]`).forEach(el => {
         el.classList.add('active');
-        // For piano/keyboard input, determine primary based on chord type and majorOnTop setting
+        
         const chordType = el.getAttribute('data-chord-type');
-        if (chordType) {
-            // isPrimary true means this note is a major chord center and majorOnTop is true
-            // OR this note is a minor chord center and majorOnTop is false
-            // So if isPrimary is true, highlight the major version
+        if (specificType) {
+            // From wheel click - only highlight the specific type
+            if (chordType === specificType) {
+                el.classList.add('active-primary');
+            }
+        } else if (chordType) {
+            // From piano/keyboard - determine based on isPrimary
             const shouldBePrimary = (isPrimary && chordType === 'major') || (!isPrimary && chordType === 'minor');
             if (shouldBePrimary) {
                 el.classList.add('active-primary');
             }
-        } else if (isPrimary) {
-            // For piano keys (no chord type)
+        } else {
+            // For piano keys (no chord type) - always add active-primary for consistent darker shading
             el.classList.add('active-primary');
         }
     });
     
-    // Also highlight wheel labels based on primary status and chord type
+    // Also highlight wheel labels
     if (noteName) {
         document.querySelectorAll(`.note-label[data-note="${noteName}"]`).forEach(label => {
             const labelType = label.getAttribute('data-type');
-            if (labelType) {
+            if (specificType) {
+                // From wheel click - only highlight the specific type
+                if (labelType === specificType) {
+                    label.classList.add('primary-active');
+                }
+            } else if (labelType) {
+                // From piano/keyboard - determine based on isPrimary
                 const shouldBePrimary = (isPrimary && labelType === 'major') || (!isPrimary && labelType === 'minor');
                 if (shouldBePrimary) {
                     label.classList.add('primary-active');
@@ -444,24 +472,10 @@ function playNote(frequency, applyOctaveShift = true, isPrimary = true) {
             }
         });
     }
-    if (noteName) {
-        // Remove any existing instance of this note
-        const existingIndex = heldNotes.findIndex(note => 
-            (typeof note === 'string' ? note : note.note) === noteName
-        );
-        if (existingIndex > -1) {
-            heldNotes.splice(existingIndex, 1);
-        }
-        
-        // Add new note (default source is not wheel, so use setting)
-        heldNotes.push(noteName);
-        lastPlayedNote = noteName;
-        updateCenterDisplay();
-    }
 }
 
-// Function to play a note from the wheel with specific type
-function playNoteFromWheel(frequency, noteName, type) {
+// Helper function to create and configure oscillator
+function createOscillator(frequency, octaveShift) {
     const actualFrequency = frequency * Math.pow(2, octaveShift);
     
     // Always stop any existing instance of this note first
@@ -478,39 +492,50 @@ function playNoteFromWheel(frequency, noteName, type) {
     oscillator.frequency.value = actualFrequency;
     oscillator.type = 'sine';
     
+    // Start with zero gain to avoid pops
     gainNode.gain.value = 0;
     gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+    // Fixed volume for all notes - let compressor handle limiting
     gainNode.gain.linearRampToValueAtTime(OSC_GAIN, audioContext.currentTime + 0.007);
     
     oscillator.start();
-    activeOscillators[actualFrequency] = { oscillator, gainNode, baseFrequency: frequency, isPrimary: true, chordType: type };
     
-    // Highlight all elements with this frequency
-    document.querySelectorAll(`[data-frequency="${frequency}"]`).forEach(el => {
-        el.classList.add('active');
-        // Only add primary class to the clicked chord type
-        if (el.getAttribute('data-chord-type') === type) {
-            el.classList.add('active-primary');
-        }
-    });
+    return { oscillator, gainNode, actualFrequency };
+}
+
+// Common function to handle note start for any input source
+function handleNoteStart(frequency, source = 'keyboard', chordType = null) {
+    const noteName = getNoteFromFrequency(frequency);
     
-    // Also highlight wheel labels for the clicked chord type only
-    document.querySelectorAll(`.note-label[data-note="${noteName}"][data-type="${type}"]`).forEach(label => {
-        label.classList.add('primary-active');
-    });
+    // Determine if this note should be primary
+    let isPrimary = shouldNoteBePrimary(noteName, source, chordType);
     
-    // Update held notes with source information
-    const existingIndex = heldNotes.findIndex(note => 
-        (typeof note === 'string' ? note : note.note) === noteName
-    );
-    if (existingIndex > -1) {
-        heldNotes.splice(existingIndex, 1);
-    }
+    // Create and start the oscillator
+    const { oscillator, gainNode, actualFrequency } = createOscillator(frequency, octaveShift);
     
-    // Add note with wheel source and type information
-    heldNotes.push({ note: noteName, source: 'wheel', type: type });
-    lastPlayedNote = { note: noteName, source: 'wheel', type: type };
-    updateCenterDisplay();
+    activeOscillators[actualFrequency] = { 
+        oscillator, 
+        gainNode, 
+        baseFrequency: frequency, 
+        isPrimary,
+        chordType: source === 'wheel' ? chordType : undefined
+    };
+    
+    // Highlight elements
+    highlightNoteElements(frequency, noteName, isPrimary, chordType);
+    
+    // Update held notes
+    updateHeldNotes(noteName, source, chordType);
+}
+
+// Function to play a note (simplified to use common handler)
+function playNote(frequency, applyOctaveShift = true, isPrimary = true) {
+    handleNoteStart(frequency, 'keyboard', null);
+}
+
+// Function to play a note from the wheel with specific type (simplified to use common handler)
+function playNoteFromWheel(frequency, noteName, type) {
+    handleNoteStart(frequency, 'wheel', type);
 }
 
 // Function to stop a note
@@ -678,40 +703,67 @@ function createWheel() {
     });
 }
 
-// Setup event listeners for wheel elements
-function setupWheelEventListeners(pathElement, frequency, noteName, type) {
-    pathElement.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        isMouseDown = true;
+// Common mouse/touch event handlers
+function handleMouseDown(e, frequency, source = 'keyboard', chordType = null) {
+    e.preventDefault();
+    isMouseDown = true;
+    if (currentPlayingFrequency && currentPlayingFrequency !== frequency) {
+        const actualFrequency = currentPlayingFrequency * Math.pow(2, octaveShift);
+        stopNote(actualFrequency);
+    }
+    currentPlayingFrequency = frequency;
+    
+    if (source === 'wheel') {
+        playNoteFromWheel(frequency, getNoteFromFrequency(frequency), chordType);
+    } else {
+        const noteName = getNoteFromFrequency(frequency);
+        const isPrimary = shouldNoteBePrimary(noteName);
+        playNote(frequency, true, isPrimary);
+    }
+}
+
+function handleMouseEnter(e, frequency, source = 'keyboard', chordType = null) {
+    if (isMouseDown) {
         if (currentPlayingFrequency && currentPlayingFrequency !== frequency) {
             const actualFrequency = currentPlayingFrequency * Math.pow(2, octaveShift);
             stopNote(actualFrequency);
         }
         currentPlayingFrequency = frequency;
-        playNoteFromWheel(frequency, noteName, type);
-    });
-    
-    pathElement.addEventListener('mouseenter', (e) => {
-        if (isMouseDown) {
-            if (currentPlayingFrequency && currentPlayingFrequency !== frequency) {
-                const actualFrequency = currentPlayingFrequency * Math.pow(2, octaveShift);
-                stopNote(actualFrequency);
-            }
-            currentPlayingFrequency = frequency;
-            playNoteFromWheel(frequency, noteName, type);
+        
+        if (source === 'wheel') {
+            playNoteFromWheel(frequency, getNoteFromFrequency(frequency), chordType);
+        } else {
+            const noteName = getNoteFromFrequency(frequency);
+            const isPrimary = shouldNoteBePrimary(noteName);
+            playNote(frequency, true, isPrimary);
         }
-    });
+    }
+}
+
+function handleTouchStart(e, frequency, source = 'keyboard', chordType = null) {
+    e.preventDefault();
     
-    pathElement.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        playNoteFromWheel(frequency, noteName, type);
-    });
-    
-    pathElement.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        const actualFrequency = frequency * Math.pow(2, octaveShift);
-        stopNote(actualFrequency);
-    });
+    if (source === 'wheel') {
+        playNoteFromWheel(frequency, getNoteFromFrequency(frequency), chordType);
+    } else {
+        const noteName = getNoteFromFrequency(frequency);
+        const isPrimary = shouldNoteBePrimary(noteName);
+        playNote(frequency, true, isPrimary);
+    }
+}
+
+function handleTouchEnd(e, frequency) {
+    e.preventDefault();
+    const actualFrequency = frequency * Math.pow(2, octaveShift);
+    stopNote(actualFrequency);
+}
+
+// Setup event listeners for wheel elements
+function setupWheelEventListeners(pathElement, frequency, noteName, type) {
+    pathElement.addEventListener('mousedown', (e) => handleMouseDown(e, frequency, 'wheel', type));
+    pathElement.addEventListener('mouseenter', (e) => handleMouseEnter(e, frequency, 'wheel', type));
+    pathElement.addEventListener('touchstart', (e) => handleTouchStart(e, frequency, 'wheel', type));
+    pathElement.addEventListener('touchend', (e) => handleTouchEnd(e, frequency));
 }
 
 // Setup global event handlers
@@ -728,8 +780,8 @@ function setupEventHandlers() {
     
     // Keyboard event handlers
     document.addEventListener('keydown', (e) => {
-        // Ignore if modifier keys are pressed or if typing in an input
-        if (e.ctrlKey || e.metaKey || e.altKey || e.target.tagName === 'INPUT') return;
+        // Ignore if modifier keys are pressed
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
         
         const key = e.key.toLowerCase();
         
@@ -753,24 +805,7 @@ function setupEventHandlers() {
         
         if (frequency && !activeKeys.has(key)) {
             activeKeys.add(key);
-            
-            // Determine if this note should be primary based on majorOnTop setting
-            const noteName = getNoteFromFrequency(frequency);
-            let isPrimary = true;
-            if (noteName) {
-                // Check if this note has a counterpart on the wheel
-                const majorCounterpart = shiftNoteBySemitones(noteName, 3);
-                const minorCounterpart = shiftNoteBySemitones(noteName, -3);
-                
-                if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
-                    // If majorOnTop is true, major notes should be primary (white)
-                    // If majorOnTop is false, minor notes should be primary (white)
-                    const isMajorNote = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
-                    isPrimary = majorOnTop ? isMajorNote : !isMajorNote;
-                }
-            }
-            
-            playNote(frequency, true, isPrimary);
+            handleNoteStart(frequency, 'keyboard');
         }
     });
     
@@ -875,91 +910,10 @@ function createPianoKeyboard() {
 
 // Setup event listeners for piano keys
 function setupPianoKeyEventListeners(keyElement, frequency) {
-    keyElement.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        isMouseDown = true;
-        if (currentPlayingFrequency && currentPlayingFrequency !== frequency) {
-            const actualFrequency = currentPlayingFrequency * Math.pow(2, octaveShift);
-            stopNote(actualFrequency);
-        }
-        currentPlayingFrequency = frequency;
-        
-        // Determine if this note should be primary based on majorOnTop setting
-        const noteName = getNoteFromFrequency(frequency);
-        let isPrimary = true;
-        if (noteName) {
-            // Check if this note has a counterpart on the wheel
-            const majorCounterpart = shiftNoteBySemitones(noteName, 3);
-            const minorCounterpart = shiftNoteBySemitones(noteName, -3);
-            
-            if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
-                // Determine if the current note represents a major or minor chord center
-                // A note is a "major chord center" if it has a minor counterpart 3 semitones down
-                const isMajorChordCenter = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
-                // Primary highlighting depends on the majorOnTop setting
-                isPrimary = majorOnTop ? isMajorChordCenter : !isMajorChordCenter;
-            }
-        }
-        
-        playNote(frequency, true, isPrimary);
-    });
-    
-    keyElement.addEventListener('mouseenter', (e) => {
-        if (isMouseDown) {
-            if (currentPlayingFrequency && currentPlayingFrequency !== frequency) {
-                const actualFrequency = currentPlayingFrequency * Math.pow(2, octaveShift);
-                stopNote(actualFrequency);
-            }
-            currentPlayingFrequency = frequency;
-            
-            // Determine if this note should be primary based on majorOnTop setting
-            const noteName = getNoteFromFrequency(frequency);
-            let isPrimary = true;
-            if (noteName) {
-                // Check if this note has a counterpart on the wheel
-                const majorCounterpart = shiftNoteBySemitones(noteName, 3);
-                const minorCounterpart = shiftNoteBySemitones(noteName, -3);
-                
-                if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
-                    // If majorOnTop is true, major notes should be primary (white)
-                    // If majorOnTop is false, minor notes should be primary (white)
-                    const isMajorNote = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
-                    isPrimary = majorOnTop ? isMajorNote : !isMajorNote;
-                }
-            }
-            
-            playNote(frequency, true, isPrimary);
-        }
-    });
-    
-    keyElement.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        
-        // Determine if this note should be primary based on majorOnTop setting
-        const noteName = getNoteFromFrequency(frequency);
-        let isPrimary = true;
-        if (noteName) {
-            // Check if this note has a counterpart on the wheel
-            const majorCounterpart = shiftNoteBySemitones(noteName, 3);
-            const minorCounterpart = shiftNoteBySemitones(noteName, -3);
-            
-            if (NOTE_FREQUENCIES[majorCounterpart] || NOTE_FREQUENCIES[minorCounterpart]) {
-                // Determine if the current note represents a major or minor chord center
-                // A note is a "major chord center" if it has a minor counterpart 3 semitones down
-                const isMajorChordCenter = NOTE_FREQUENCIES[minorCounterpart] !== undefined;
-                // Primary highlighting depends on the majorOnTop setting
-                isPrimary = majorOnTop ? isMajorChordCenter : !isMajorChordCenter;
-            }
-        }
-        
-        playNote(frequency, true, isPrimary);
-    });
-    
-    keyElement.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        const actualFrequency = frequency * Math.pow(2, octaveShift);
-        stopNote(actualFrequency);
-    });
+    keyElement.addEventListener('mousedown', (e) => handleMouseDown(e, frequency, 'piano'));
+    keyElement.addEventListener('mouseenter', (e) => handleMouseEnter(e, frequency, 'piano'));
+    keyElement.addEventListener('touchstart', (e) => handleTouchStart(e, frequency, 'piano'));
+    keyElement.addEventListener('touchend', (e) => handleTouchEnd(e, frequency));
 }
 
 // Setup options panel
@@ -1026,11 +980,6 @@ function setupOptionsPanel() {
         masterGainNode.gain.setValueAtTime(MASTER_GAIN, audioContext.currentTime);
         saveSettings({ majorOnTop, volume: MASTER_GAIN, notationType, useFlats });
     });
-    
-    // Prevent volume slider from stealing keyboard focus
-    volumeSlider.addEventListener('mousedown', () => {
-        setTimeout(() => volumeSlider.blur(), 100);
-    });
 }
 
 // Setup octave controls
@@ -1063,19 +1012,12 @@ function setupOctaveControls() {
         activeNotes.forEach(note => {
             const noteName = getNoteFromFrequency(note.baseFreq);
             if (noteName) {
-                // Check if this note was from wheel or regular play
-                const isFromWheel = heldNotes.some(heldNote => 
-                    typeof heldNote === 'object' && 
-                    heldNote.note === noteName && 
-                    heldNote.source === 'wheel'
+                // Find the held note info if it exists
+                const heldNote = heldNotes.find(hn => 
+                    (typeof hn === 'object' ? hn.note : hn) === noteName
                 );
                 
-                if (isFromWheel) {
-                    const heldNote = heldNotes.find(hn => 
-                        typeof hn === 'object' && 
-                        hn.note === noteName && 
-                        hn.source === 'wheel'
-                    );
+                if (heldNote && typeof heldNote === 'object' && heldNote.source === 'wheel') {
                     playNoteFromWheel(note.baseFreq, noteName, heldNote.type);
                 } else {
                     playNote(note.baseFreq);
